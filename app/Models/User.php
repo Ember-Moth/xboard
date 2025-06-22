@@ -62,6 +62,8 @@ class User extends Authenticatable
     protected $dateFormat = 'U';
     protected $guarded = ['id'];
     protected $casts = [
+        'is_admin' => 'int',
+        'is_staff' => 'int',
         'created_at' => 'timestamp',
         'updated_at' => 'timestamp',
         'banned' => 'integer',
