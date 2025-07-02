@@ -52,13 +52,14 @@ class XboardInstall extends Command
         try {
             $isDocker = file_exists('/.dockerenv');
             $enableSqlite = getenv('ENABLE_SQLITE', false);
-            $enableRedis = getenv('ENABLE_REDIS', false);
             $adminAccount = getenv('ADMIN_ACCOUNT', false);
+
             $this->info("__    __ ____                      _  ");
             $this->info("\ \  / /| __ )  ___   __ _ _ __ __| | ");
             $this->info(" \ \/ / | __ \ / _ \ / _` | '__/ _` | ");
             $this->info(" / /\ \ | |_) | (_) | (_| | | | (_| | ");
             $this->info("/_/  \_\|____/ \___/ \__,_|_|  \__,_| ");
+
             if (
                 (File::exists(base_path() . '/.env') && $this->getEnvValue('INSTALLED'))
                 || (getenv('INSTALLED', false) && $isDocker)
@@ -70,10 +71,12 @@ class XboardInstall extends Command
                 note('rm .env && touch .env');
                 return;
             }
+
             if (is_dir(base_path() . '/.env')) {
                 $this->error('😔：安装失败，Docker环境下安装请保留空的 .env 文件');
                 return;
             }
+
             // 选择数据库类型
             $dbType = $enableSqlite ? 'sqlite' : select(
                 label: '请选择数据库类型',
@@ -96,19 +99,16 @@ class XboardInstall extends Command
             if (is_null($envConfig)) {
                 return; // 用户选择退出安装
             }
+
             $envConfig['APP_KEY'] = 'base64:' . base64_encode(Encrypter::generateKey('AES-256-CBC'));
-            $isReidsValid = false;
-            while (!$isReidsValid) {
-                // 判断是否为Docker环境
-                if ($isDocker == 'true' && ($enableRedis || confirm(label: '是否启用Docker内置的Redis', default: true, yes: '启用', no: '不启用'))) {
-                    $envConfig['REDIS_HOST'] = '/data/redis.sock';
-                    $envConfig['REDIS_PORT'] = 0;
-                    $envConfig['REDIS_PASSWORD'] = null;
-                } else {
-                    $envConfig['REDIS_HOST'] = text(label: '请输入Redis地址', default: '127.0.0.1', required: true);
-                    $envConfig['REDIS_PORT'] = text(label: '请输入Redis端口', default: '6379', required: true);
-                    $envConfig['REDIS_PASSWORD'] = text(label: '请输入redis密码(默认: null)', default: '');
-                }
+
+            // 统一手动输入 Redis 配置
+            $isRedisValid = false;
+            while (!$isRedisValid) {
+                $envConfig['REDIS_HOST'] = text(label: '请输入Redis地址', default: '127.0.0.1', required: true);
+                $envConfig['REDIS_PORT'] = text(label: '请输入Redis端口', default: '6379', required: true);
+                $envConfig['REDIS_PASSWORD'] = text(label: '请输入redis密码(默认: null)', default: '');
+
                 $redisConfig = [
                     'client' => 'phpredis',
                     'default' => [
@@ -118,15 +118,14 @@ class XboardInstall extends Command
                         'database' => 0,
                     ],
                 ];
+
                 try {
                     $redis = new \Illuminate\Redis\RedisManager(app(), 'phpredis', $redisConfig);
                     $redis->ping();
-                    $isReidsValid = true;
+                    $isRedisValid = true;
                 } catch (\Exception $e) {
-                    // 连接失败，输出错误消息
                     $this->error("redis连接失败：" . $e->getMessage());
                     $this->info("请重新输入REDIS配置");
-                    $enableRedis = false;
                     sleep(1);
                 }
             }
@@ -134,7 +133,7 @@ class XboardInstall extends Command
             if (!copy(base_path() . '/.env.example', base_path() . '/.env')) {
                 abort(500, '复制环境文件失败，请检查目录权限');
             }
-            ;
+
             $email = !empty($adminAccount) ? $adminAccount : text(
                 label: '请输入管理员账号',
                 default: 'admin@demo.com',
@@ -145,6 +144,7 @@ class XboardInstall extends Command
                 }
             );
             $password = Helper::guid(false);
+
             $this->saveToEnv($envConfig);
 
             $this->call('config:cache');
@@ -154,15 +154,18 @@ class XboardInstall extends Command
             $this->info(Artisan::output());
             $this->info('数据库导入完成');
             $this->info('开始注册管理员账号');
+
             if (!self::registerAdmin($email, $password)) {
                 abort(500, '管理员账号注册失败，请重试');
             }
+
             $this->info('🎉：一切就绪');
             $this->info("管理员邮箱：{$email}");
             $this->info("管理员密码：{$password}");
 
             $defaultSecurePath = hash('crc32b', config('app.key'));
             $this->info("访问 http(s)://你的站点/{$defaultSecurePath} 进入管理面板，你可以在用户中心修改你的密码。");
+
             $envConfig['INSTALLED'] = true;
             $this->saveToEnv($envConfig);
         } catch (\Exception $e) {
