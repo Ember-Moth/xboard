@@ -1,0 +1,30 @@
+<div style="background: linear-gradient(145deg, #f6f8fb 0%, #f0f3f7 100%); padding: 40px 20px;">
+    <div style="max-width: 580px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(32, 43, 54, 0.08);">
+        <!-- Logo区域 -->
+        <div style="padding: 35px 40px; text-align: center; border-bottom: 1px solid #f1f3f5;">
+            <h1 style="margin: 0; font-size: 22px; color: #2c3345; font-weight: 600; letter-spacing: -0.5px;">{{$name}}</h1>
+        </div>
+        
+        <!-- 内容区 -->
+        <div style="padding: 40px;">
+            <div style="text-align: center; margin-bottom: 35px;">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" style="margin: 0 auto;">
+                    <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" stroke="#2c3345" stroke-width="1.5"/>
+                    <path d="M12 8V12M12 16H12.01" stroke="#2c3345" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                <h2 style="margin: 20px 0 0; font-size: 20px; color: #2c3345; font-weight: 600;">系统通知</h2>
+            </div>
+
+            <div style="margin: 35px 0; padding: 25px; background: linear-gradient(145deg, #f9fafb 0%, #f5f7f9 100%); border: 1px solid #e9ecef; border-radius: 12px; font-size: 15px; color: #4f566b; line-height: 1.7;">
+                {!! nl2br($content) !!}
+            </div>
+        </div>
+        
+        <!-- 底部 -->
+        <div style="padding: 20px; background-color: #f9fafb; text-align: center;">
+            <p style="margin: 0; font-size: 13px; color: #8792a2;">
+                系统通知 · {{$name}}
+            </p>
+        </div>
+    </div>
+</div> 
