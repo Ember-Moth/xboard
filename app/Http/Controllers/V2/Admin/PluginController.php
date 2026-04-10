@@ -64,50 +64,75 @@ class PluginController extends Controller
         $plugins = [];
 
         if (File::exists($pluginPath)) {
-            $directories = File::directories($pluginPath);
-            foreach ($directories as $directory) {
-                $pluginName = basename($directory);
-                $configFile = $directory . '/config.json';
-                if (File::exists($configFile)) {
-                    $config = json_decode(File::get($configFile), true);
-                    $code = $config['code'];
-                    $pluginType = $config['type'] ?? Plugin::TYPE_FEATURE;
-
-                    // 如果指定了类型，过滤插件
-                    if ($type && $pluginType !== $type) {
-                        continue;
-                    }
-
-                    $installed = isset($installedPlugins[$code]);
-                    $pluginConfig = $installed ? $this->configService->getConfig($code) : ($config['config'] ?? []);
-                    $readmeFile = collect(['README.md', 'readme.md'])
-                        ->map(fn($f) => $directory . '/' . $f)
-                        ->first(fn($path) => File::exists($path));
-                    $readmeContent = $readmeFile ? File::get($readmeFile) : '';
-                    $needUpgrade = false;
-                    if ($installed) {
-                        $installedVersion = $installedPlugins[$code]['version'] ?? null;
-                        $localVersion = $config['version'] ?? null;
-                        if ($installedVersion && $localVersion && version_compare($localVersion, $installedVersion, '>')) {
-                            $needUpgrade = true;
-                        }
-                    }
-                    $plugins[] = [
-                        'code' => $config['code'],
-                        'name' => $config['name'],
-                        'version' => $config['version'],
-                        'description' => $config['description'],
-                        'author' => $config['author'],
-                        'type' => $pluginType,
-                        'is_installed' => $installed,
-                        'is_enabled' => $installed ? $installedPlugins[$code]['is_enabled'] : false,
-                        'is_protected' => in_array($code, Plugin::PROTECTED_PLUGINS),
-                        'can_be_deleted' => !in_array($code, Plugin::PROTECTED_PLUGINS),
-                        'config' => $pluginConfig,
-                        'readme' => $readmeContent,
-                        'need_upgrade' => $needUpgrade,
-                    ];
+            // Scan for .phar files only
+            $files = File::files($pluginPath);
+            foreach ($files as $file) {
+                $filename = $file->getFilename();
+                if (!Str::endsWith($filename, '.phar')) {
+                    continue;
                 }
+
+                // Get plugin code from filename: Telegram.phar -> telegram
+                $filePath = $file->getPathname();
+                $pluginName = basename($filename, '.phar');
+                $code = Str::snake($pluginName);
+
+                // Read config from within PHAR
+                $configFile = "phar://{$filePath}/config.json";
+                if (!File::exists($configFile)) {
+                    continue;
+                }
+
+                $config = json_decode(File::get($configFile), true);
+                if (!isset($config['code'])) {
+                    continue;
+                }
+
+                $code = $config['code'];
+                $pluginType = $config['type'] ?? Plugin::TYPE_FEATURE;
+
+                // 如果指定了类型，过滤插件
+                if ($type && $pluginType !== $type) {
+                    continue;
+                }
+
+                $installed = isset($installedPlugins[$code]);
+                $pluginConfig = $installed ? $this->configService->getConfig($code) : ($config['config'] ?? []);
+
+                // Read README from within PHAR
+                $readmeContent = '';
+                foreach (['README.md', 'readme.md'] as $f) {
+                    $readmePath = "phar://{$filePath}/{$f}";
+                    if (File::exists($readmePath)) {
+                        $readmeContent = File::get($readmePath);
+                        break;
+                    }
+                }
+
+                $needUpgrade = false;
+                if ($installed) {
+                    $installedVersion = $installedPlugins[$code]['version'] ?? null;
+                    $localVersion = $config['version'] ?? null;
+                    if ($installedVersion && $localVersion && version_compare($localVersion, $installedVersion, '>')) {
+                        $needUpgrade = true;
+                    }
+                }
+
+                $plugins[] = [
+                    'code' => $config['code'],
+                    'name' => $config['name'],
+                    'version' => $config['version'],
+                    'description' => $config['description'],
+                    'author' => $config['author'],
+                    'type' => $pluginType,
+                    'is_installed' => $installed,
+                    'is_enabled' => $installed ? $installedPlugins[$code]['is_enabled'] : false,
+                    'is_protected' => in_array($code, Plugin::PROTECTED_PLUGINS),
+                    'can_be_deleted' => !in_array($code, Plugin::PROTECTED_PLUGINS),
+                    'config' => $pluginConfig,
+                    'readme' => $readmeContent,
+                    'need_upgrade' => $needUpgrade,
+                ];
             }
         }
 
@@ -279,13 +304,13 @@ class PluginController extends Controller
             'file' => [
                 'required',
                 'file',
-                'mimes:zip',
+                'mimes:phar',
                 'max:10240', // 最大10MB
             ]
         ], [
             'file.required' => '请选择插件包文件',
             'file.file' => '无效的文件类型',
-            'file.mimes' => '插件包必须是zip格式',
+            'file.mimes' => '插件包必须是phar格式',
             'file.max' => '插件包大小不能超过10MB'
         ]);
 

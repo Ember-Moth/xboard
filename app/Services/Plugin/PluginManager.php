@@ -33,11 +33,27 @@ class PluginManager
     }
 
     /**
-     * 获取插件的基础路径
+     * 获取 PHAR 文件在文件系统的路径
+     */
+    public function getPharFilePath(string $pluginCode): string
+    {
+        return $this->pluginPath . '/' . Str::studly($pluginCode) . '.phar';
+    }
+
+    /**
+     * 获取提取目录在 storage 下的基础路径
+     */
+    public function getExtractBasePath(string $pluginCode): string
+    {
+        return storage_path('plugins/' . $pluginCode);
+    }
+
+    /**
+     * 获取插件基础路径（带 phar:// 包装）
      */
     public function getPluginPath(string $pluginCode): string
     {
-        return $this->pluginPath . '/' . Str::studly($pluginCode);
+        return 'phar://' . $this->getPharFilePath($pluginCode);
     }
 
     /**
@@ -49,17 +65,24 @@ class PluginManager
             return $this->loadedPlugins[$pluginCode];
         }
 
-        $pluginClass = $this->getPluginNamespace($pluginCode) . '\\Plugin';
-
-        if (!class_exists($pluginClass)) {
-            $pluginFile = $this->getPluginPath($pluginCode) . '/Plugin.php';
-            if (!File::exists($pluginFile)) {
-                Log::warning("Plugin class file not found: {$pluginFile}");
-                Plugin::query()->where('code', $pluginCode)->delete();
-                return null;
-            }
-            require_once $pluginFile;
+        $pharFile = $this->getPharFilePath($pluginCode);
+        if (!File::exists($pharFile)) {
+            Log::warning("Plugin PHAR file not found: {$pharFile}");
+            Plugin::query()->where('code', $pluginCode)->delete();
+            return null;
         }
+
+        $pluginClass = $this->getPluginNamespace($pluginCode) . '\\Plugin';
+        $pluginFile = $this->getPluginPath($pluginCode) . '/Plugin.php';
+
+        if (!File::exists($pluginFile)) {
+            Log::warning("Plugin class file not found in PHAR: {$pluginFile}");
+            Plugin::query()->where('code', $pluginCode)->delete();
+            return null;
+        }
+
+        // Directly require from PHAR, don't rely on Composer autoloader
+        require_once $pluginFile;
 
         if (!class_exists($pluginClass)) {
             Log::error("Plugin class not found: {$pluginClass}");
@@ -90,6 +113,7 @@ class PluginManager
     protected function loadRoutes(string $pluginCode): void
     {
         $routesPath = $this->getPluginPath($pluginCode) . '/routes';
+        // File::exists works with phar:// stream wrapper
         if (File::exists($routesPath)) {
             $webRouteFile = $routesPath . '/web.php';
             $apiRouteFile = $routesPath . '/api.php';
@@ -115,10 +139,9 @@ class PluginManager
      */
     protected function loadViews(string $pluginCode): void
     {
-        $viewsPath = $this->getPluginPath($pluginCode) . '/resources/views';
+        $viewsPath = $this->getExtractBasePath($pluginCode) . '/resources/views';
         if (File::exists($viewsPath)) {
             View::addNamespace(Str::studly($pluginCode), $viewsPath);
-            return;
         }
     }
 
@@ -128,7 +151,7 @@ class PluginManager
     protected function registerPluginCommands(string $pluginCode, AbstractPlugin $pluginInstance): void
     {
         try {
-            // 调用插件的命令注册方法
+            // Commands are already discoverable via phar:// path in AbstractPlugin->registerCommands
             $pluginInstance->registerCommands();
         } catch (\Exception $e) {
             Log::error("Failed to register commands for plugin '{$pluginCode}': " . $e->getMessage());
@@ -161,8 +184,15 @@ class PluginManager
             throw new \Exception('Dependencies not satisfied');
         }
 
+        // Extract views from PHAR to storage (Laravel can't load views from PHAR directly)
+        $viewsSource = $this->getPluginPath($pluginCode) . '/resources/views';
+        if (File::exists($viewsSource)) {
+            $extractPath = $this->getExtractBasePath($pluginCode) . '/resources/views';
+            $this->extractFromPhar($pluginCode, 'resources/views', $extractPath);
+        }
+
         // 运行数据库迁移
-        $this->runMigrations(pluginCode: $pluginCode);
+        $this->runMigrations($pluginCode);
 
         DB::beginTransaction();
         try {
@@ -224,11 +254,14 @@ class PluginManager
      */
     protected function runMigrations(string $pluginCode): void
     {
-        $migrationsPath = $this->getPluginPath($pluginCode) . '/database/migrations';
+        // Extract migrations from PHAR to storage
+        $migrationsSource = $this->getPluginPath($pluginCode) . '/database/migrations';
+        if (File::exists($migrationsSource)) {
+            $extractPath = $this->getExtractBasePath($pluginCode) . '/database/migrations';
+            $this->extractFromPhar($pluginCode, 'database/migrations', $extractPath);
 
-        if (File::exists($migrationsPath)) {
             Artisan::call('migrate', [
-                '--path' => "plugins/" . Str::studly($pluginCode) . "/database/migrations",
+                '--path' => "storage/plugins/{$pluginCode}/database/migrations",
                 '--force' => true
             ]);
         }
@@ -239,13 +272,72 @@ class PluginManager
      */
     protected function runMigrationsRollback(string $pluginCode): void
     {
-        $migrationsPath = $this->getPluginPath($pluginCode) . '/database/migrations';
-
-        if (File::exists($migrationsPath)) {
+        $extractPath = $this->getExtractBasePath($pluginCode) . '/database/migrations';
+        if (File::exists($extractPath)) {
             Artisan::call('migrate:rollback', [
-                '--path' => "plugins/" . Str::studly($pluginCode) . "/database/migrations",
+                '--path' => "storage/plugins/{$pluginCode}/database/migrations",
                 '--force' => true
             ]);
+        }
+    }
+
+    /**
+     * Extract a directory from PHAR to the filesystem
+     */
+    protected function extractFromPhar(string $pluginCode, string $sourceDirInPhar, string $targetDir): bool
+    {
+        $pharPath = $this->getPharFilePath($pluginCode);
+
+        if (!File::exists($pharPath)) {
+            return false;
+        }
+
+        try {
+            $phar = new \Phar($pharPath);
+            $sourcePrefix = rtrim($sourceDirInPhar, '/') . '/';
+            $sourcePrefixLength = strlen($sourcePrefix);
+
+            // Check if source directory exists in PHAR
+            $hasFiles = false;
+            foreach ($phar as $file) {
+                if (str_starts_with($file->getPathname(), $sourcePrefix)) {
+                    $hasFiles = true;
+                    break;
+                }
+            }
+
+            if (!$hasFiles) {
+                return false;
+            }
+
+            // Ensure target directory exists
+            File::ensureDirectoryExists($targetDir);
+
+            // Extract each file
+            foreach ($phar as $file) {
+                $filePath = $file->getPathname();
+                if (!str_starts_with($filePath, $sourcePrefix)) {
+                    continue;
+                }
+
+                if ($file->isDir()) {
+                    continue;
+                }
+
+                $relativePath = substr($filePath, $sourcePrefixLength);
+                $targetPath = $targetDir . '/' . $relativePath;
+
+                // Ensure parent directory exists
+                File::ensureDirectoryExists(dirname($targetPath));
+
+                // Copy content
+                File::put($targetPath, file_get_contents($file->getPathName()));
+            }
+
+            return true;
+        } catch (\Exception $e) {
+            Log::error("Failed to extract from PHAR: " . $e->getMessage());
+            return false;
         }
     }
 
@@ -254,11 +346,11 @@ class PluginManager
      */
     protected function publishAssets(string $pluginCode): void
     {
-        $assetsPath = $this->getPluginPath($pluginCode) . '/resources/assets';
-        if (File::exists($assetsPath)) {
+        $assetsSource = $this->getPluginPath($pluginCode) . '/resources/assets';
+        if (File::exists($assetsSource)) {
             $publishPath = public_path('plugins/' . $pluginCode);
-            File::ensureDirectoryExists($publishPath);
-            File::copyDirectory($assetsPath, $publishPath);
+            // Extract from PHAR to public
+            $this->extractFromPhar($pluginCode, 'resources/assets', $publishPath);
         }
     }
 
@@ -395,13 +487,25 @@ class PluginManager
             $this->uninstall($pluginCode);
         }
 
-        $pluginPath = $this->getPluginPath($pluginCode);
-        if (!File::exists($pluginPath)) {
+        $pharFile = $this->getPharFilePath($pluginCode);
+        if (!File::exists($pharFile)) {
             throw new \Exception('插件不存在');
         }
 
-        // 删除插件目录
-        File::deleteDirectory($pluginPath);
+        // Delete PHAR file
+        File::delete($pharFile);
+
+        // Delete published assets
+        $assetsPath = public_path('plugins/' . $pluginCode);
+        if (File::exists($assetsPath)) {
+            File::deleteDirectory($assetsPath);
+        }
+
+        // Delete extracted files in storage
+        $extractPath = $this->getExtractBasePath($pluginCode);
+        if (File::exists($extractPath)) {
+            File::deleteDirectory($extractPath);
+        }
 
         return true;
     }
@@ -453,18 +557,40 @@ class PluginManager
         }
 
         $this->disable($pluginCode);
+
+        // Cleanup old extracted files and republish
+        $extractPath = $this->getExtractBasePath($pluginCode);
+        if (File::exists($extractPath)) {
+            File::deleteDirectory($extractPath);
+        }
+
+        // Extract views from updated PHAR
+        $viewsSource = $this->getPluginPath($pluginCode) . '/resources/views';
+        if (File::exists($viewsSource)) {
+            $targetPath = $extractPath . '/resources/views';
+            $this->extractFromPhar($pluginCode, 'resources/views', $targetPath);
+        }
+
+        // Republish assets
+        $assetsPath = public_path('plugins/' . $pluginCode);
+        if (File::exists($assetsPath)) {
+            File::deleteDirectory($assetsPath);
+        }
+        $this->publishAssets($pluginCode);
+
+        // Run migrations
         $this->runMigrations($pluginCode);
 
         $plugin = $this->loadPlugin($pluginCode);
-            if ($plugin) {
-                if (!empty($dbPlugin->config)) {
-                    $values = json_decode($dbPlugin->config, true) ?: [];
-                    $values = $this->castConfigValuesByType($pluginCode, $values);
-                    $plugin->setConfig($values);
-                }
-
-                $plugin->update($oldVersion, $newVersion);
+        if ($plugin) {
+            if (!empty($dbPlugin->config)) {
+                $values = json_decode($dbPlugin->config, true) ?: [];
+                $values = $this->castConfigValuesByType($pluginCode, $values);
+                $plugin->setConfig($values);
             }
+
+            $plugin->update($oldVersion, $newVersion);
+        }
 
         $dbPlugin->update([
             'version' => $newVersion,
@@ -490,44 +616,36 @@ class PluginManager
             File::makeDirectory($tmpPath, 0755, true);
         }
 
-        $extractPath = $tmpPath . '/' . uniqid();
-        $zip = new \ZipArchive();
-
-        if ($zip->open($file->path()) !== true) {
-            throw new \Exception('无法打开插件包文件');
+        // Move uploaded PHAR directly to plugins directory
+        $extension = $file->getClientOriginalExtension();
+        if (strtolower($extension) !== 'phar') {
+            throw new \Exception('只接受 .phar 格式插件');
         }
 
-        $zip->extractTo($extractPath);
-        $zip->close();
-
-        $configFile = File::glob($extractPath . '/*/config.json');
-        if (empty($configFile)) {
-            $configFile = File::glob($extractPath . '/config.json');
+        // Read config from uploaded PHAR to verify and get plugin code
+        $tmpPhar = $file->getPathname();
+        try {
+            $configContent = file_get_contents("phar://{$tmpPhar}/config.json");
+            $config = json_decode($configContent, true);
+        } catch (\Exception $e) {
+            throw new \Exception('无法读取 PHAR 插件配置: ' . $e->getMessage());
         }
-
-        if (empty($configFile)) {
-            File::deleteDirectory($extractPath);
-            throw new \Exception('插件包格式错误：缺少配置文件');
-        }
-
-        $pluginPath = dirname(reset($configFile));
-        $config = json_decode(File::get($pluginPath . '/config.json'), true);
 
         if (!$this->validateConfig($config)) {
-            File::deleteDirectory($extractPath);
             throw new \Exception('插件配置文件格式错误');
         }
 
-        $targetPath = $this->pluginPath . '/' . Str::studly($config['code']);
-        if (File::exists($targetPath)) {
-            $installedConfigPath = $targetPath . '/config.json';
-            if (!File::exists($installedConfigPath)) {
-                throw new \Exception('已安装插件缺少配置文件，无法判断是否可升级');
-            }
-            $installedConfig = json_decode(File::get($installedConfigPath), true);
+        $pluginCode = $config['code'];
+        $targetPhar = $this->getPharFilePath($pluginCode);
 
-            $oldVersion = $installedConfig['version'] ?? null;
+        // Check if already installed and compare versions
+        if (File::exists($targetPhar)) {
+            // Get current version from installed PHAR
+            $currentConfigContent = file_get_contents($this->getPluginPath($pluginCode) . '/config.json');
+            $currentConfig = json_decode($currentConfigContent, true);
+            $oldVersion = $currentConfig['version'] ?? null;
             $newVersion = $config['version'] ?? null;
+
             if (!$oldVersion || !$newVersion) {
                 throw new \Exception('插件缺少版本号，无法判断是否可升级');
             }
@@ -535,18 +653,21 @@ class PluginManager
                 throw new \Exception('上传插件版本不高于已安装版本，无法升级');
             }
 
-            File::deleteDirectory($targetPath);
+            // Remove old PHAR
+            File::delete($targetPhar);
         }
 
-        File::copyDirectory($pluginPath, $targetPath);
-        File::deleteDirectory($pluginPath);
-        File::deleteDirectory($extractPath);
+        // Move uploaded PHAR to final location
+        $file->move(dirname($targetPhar), basename($targetPhar));
+
+        // Cleanup temp
+        File::deleteDirectory($tmpPath);
 
         if (Plugin::where('code', $config['code'])->exists()) {
             return $this->update($config['code']);
         }
 
-        return true;
+        return $this->install($pluginCode);
     }
 
     /**
